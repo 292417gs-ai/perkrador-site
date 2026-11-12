@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>订阅格式转换 - PerkRadar</title>
+<style>
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 760px; margin: 0 auto; padding: 24px 16px; color: #222; }
+  h1 { font-size: 22px; }
+  p.note { color: #666; font-size: 14px; line-height: 1.7; }
+  textarea { width: 100%; min-height: 180px; font-family: monospace; font-size: 13px; padding: 8px; box-sizing: border-box; }
+  button { padding: 8px 16px; font-size: 15px; cursor: pointer; margin: 4px 4px 4px 0; }
+  pre { background: #f6f8fa; border: 1px solid #ddd; padding: 12px; overflow: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+  select { font-size: 15px; padding: 6px; }
+</style>
+</head>
+<body>
+<h1>订阅格式转换</h1>
+<p class="note">纯前端转换：粘贴 clash.yaml 文本，在本机浏览器里完成解析与转换，<strong>不上传、不走代理流量、不发送到任何服务器</strong>。
+支持解析 proxies 列表中的 VLESS 节点（name / server / port / uuid / tls / servername / network / path 等字段），
+可输出 sing-box JSON、v2ray 链接列表、纯文本节点列表。转换结果含你粘贴内容里的凭证信息，请勿转发给他人。</p>
+<label>粘贴 clash.yaml 文本：</label>
+<textarea id="input" placeholder="proxies:&#10;  - name: ...&#10;    type: vless&#10;    server: ...&#10;    port: 443&#10;    uuid: ..."></textarea>
+<p>
+  输出格式：
+  <select id="fmt">
+    <option value="singbox">sing-box JSON</option>
+    <option value="v2ray">v2ray 链接列表</option>
+    <option value="text">纯文本节点列表</option>
+  </select>
+  <button id="convert">转换</button>
+  <button id="copy">复制结果</button>
+  <button id="clear">清空</button>
+</p>
+<pre id="output">转换结果将显示在这里。</pre>
+<script>
+// 轻量解析：只解析 proxies: 下的 "- name:" 条目及其缩进字段，不依赖外部 YAML 库
+function parseProxies(text) {
+  const lines = text.split(/\r?\n/);
+  const proxies = [];
+  let cur = null, inProxies = false;
+  for (const line of lines) {
+    if (/^proxies:\s*$/.test(line)) { inProxies = true; continue; }
+    if (!inProxies) continue;
+    if (/^[a-zA-Z]/.test(line)) break; // proxies 段结束
+    const item = line.match(/^\s*-\s+name:\s*"?([^"\n]+)"?\s*$/);
+    if (item) { cur = { name: item[1].trim() }; proxies.push(cur); continue; }
+    if (!cur) continue;
+    const kv = line.match(/^\s+([a-zA-Z0-9_-]+):\s*"?([^"\n]*)"?\s*$/);
+    if (kv) {
+      const k = kv[1], v = kv[2].trim();
+      if (k === "port") cur.port = parseInt(v, 10);
+      else if (k === "tls" || k === "udp") cur[k] = (v === "true");
+      else cur[k] = v;
+    }
+    // 嵌套字段：reality-opts / xhttp-opts / ws-opts 下的 path
+    const pathKv = line.match(/^\s+path:\s*"?([^"\n]*)"?\s*$/);
+    if (pathKv && !cur.path) cur.path = pathKv[1].trim();
+  }
+  return proxies.filter(p => p.server && p.port);
+}
+
+function toSingBox(proxies) {
+  const outbounds = proxies.map(p => {
+    const o = { type: "vless", tag: p.name, server: p.server, server_port: p.port, uuid: p.uuid || "" };
+    if (p.tls) {
+      o.tls = { enabled: true, server_name: p.servername || p.server };
+      if (p["flow"]) o.flow = p["flow"];
+    }
+    if (p.network === "xhttp" || p.network === "ws") {
+      o.transport = { type: p.network === "xhttp" ? "http" : "ws", path: p.path || "/" };
+    }
+    return o;
+  });
+  return JSON.stringify({ outbounds }, null, 2);
+}
+
+function b64(s) { return btoa(unescape(encodeURIComponent(s))); }
+
+function toV2ray(proxies) {
+  return proxies.map(p => {
+    const params = new URLSearchParams();
+    params.set("encryption", "none");
+    params.set("security", p.tls ? "tls" : "none");
+    if (p.servername) params.set("sni", p.servername);
+    if (p.network) params.set("type", p.network);
+    if (p.path) params.set("path", p.path);
+    if (p["flow"]) params.set("flow", p["flow"]);
+    return `vless://${p.uuid || ""}@${p.server}:${p.port}?${params.toString()}#${encodeURIComponent(p.name)}`;
+  }).join("\n");
+}
+
+function toText(proxies) {
+  return proxies.map(p =>
+    `${p.name} | ${p.type || "vless"} | ${p.server}:${p.port}${p.tls ? " | TLS" : ""}${p.network ? " | " + p.network : ""}`
+  ).join("\n");
+}
+
+document.getElementById("convert").addEventListener("click", () => {
+  const text = document.getElementById("input").value;
+  const out = document.getElementById("output");
+  const proxies = parseProxies(text);
+  if (!proxies.length) { out.textContent = "未解析到可用节点：请确认粘贴的是含 proxies 列表的 clash.yaml 文本。"; return; }
+  const fmt = document.getElementById("fmt").value;
+  out.textContent = fmt === "singbox" ? toSingBox(proxies)
+    : fmt === "v2ray" ? toV2ray(proxies) : toText(proxies);
+});
+
+document.getElementById("copy").addEventListener("click", async () => {
+  const t = document.getElementById("output").textContent;
+  try { await navigator.clipboard.writeText(t); alert("已复制"); }
+  catch (e) { alert("复制失败，请手动选中复制"); }
+});
+
+document.getElementById("clear").addEventListener("click", () => {
+  document.getElementById("input").value = "";
+  document.getElementById("output").textContent = "转换结果将显示在这里。";
+});
+</script>
+</body>
+</html>
